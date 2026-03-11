@@ -19,8 +19,11 @@
   },
   "homepage": "https://github.com/xuwenjun2001/jimibot#readme",
   "dependencies": {
-    "@types/node": "^25.4.0",
+    "events": "^3.3.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0"
   }
 }
