@@ -4,7 +4,7 @@ import type {
   ToolParametersSchema,
 } from "../../types/schema.js";
 
-interface ToolSchemaDefinition {
+export interface ToolSchemaDefinition {
   type: "function";
   function: {
     name: string;
@@ -160,7 +160,11 @@ export abstract class Tool {
         }
 
         return value.flatMap((item, index) =>
-          this.validateValue(item, schema.items, this.getChildPath(path, `[${index}]`)),
+          this.validateValue(
+            item,
+            schema.items,
+            this.getChildPath(path, `[${index}]`),
+          ),
         );
 
       case "object":
@@ -243,7 +247,11 @@ export abstract class Tool {
       const propertySchema = properties[key];
       if (propertySchema !== undefined) {
         errors.push(
-          ...this.validateValue(entry, propertySchema, this.getChildPath(path, key)),
+          ...this.validateValue(
+            entry,
+            propertySchema,
+            this.getChildPath(path, key),
+          ),
         );
       }
     }
