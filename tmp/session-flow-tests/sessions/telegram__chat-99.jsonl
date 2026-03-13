@@ -1,0 +1,3 @@
+{"role":"user","content":"请帮我列出当前目录","timestamp":"2026-03-13T12:00:00.000Z"}
+{"role":"tool","content":"README.md\nsrc\npackage.json","timestamp":"2026-03-13T12:00:01.000Z","tool_call_id":"call_1","name":"exec"}
+{"role":"assistant","content":"当前目录里有 README.md、src、package.json。","timestamp":"2026-03-13T12:00:02.000Z"}
