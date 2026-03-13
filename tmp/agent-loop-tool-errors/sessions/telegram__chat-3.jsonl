@@ -1,0 +1,4 @@
+{"role":"user","content":"请试试会失败的工具","timestamp":"2026-03-13T12:49:48.459Z"}
+{"role":"assistant","content":"","timestamp":"2026-03-13T12:49:48.459Z","tool_calls":[{"id":"call_1","type":"function","function":{"name":"explode","arguments":"{}"}}]}
+{"role":"tool","content":"Error: tool failed","timestamp":"2026-03-13T12:49:48.459Z","tool_call_id":"call_1","name":"explode"}
+{"role":"assistant","content":"我已经收到工具报错，并改为直接回复你。","timestamp":"2026-03-13T12:49:48.460Z"}

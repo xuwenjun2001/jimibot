@@ -1,0 +1,4 @@
+{"role":"user","content":"请调用 echo 工具","timestamp":"2026-03-13T12:49:48.451Z"}
+{"role":"assistant","content":"","timestamp":"2026-03-13T12:49:48.451Z","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"hello from tool\"}"}}]}
+{"role":"tool","content":"hello from tool","timestamp":"2026-03-13T12:49:48.451Z","tool_call_id":"call_1","name":"echo"}
+{"role":"assistant","content":"工具已经返回：hello from tool","timestamp":"2026-03-13T12:49:48.451Z"}
