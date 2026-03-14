@@ -1,6 +1,8 @@
 import {
   appendSessionMessage,
+  readSessionState,
   readSessionMessages,
+  writeSessionState,
 } from "./jsonl.js";
 import {
   createSession,
@@ -67,12 +69,22 @@ export class SessionManager {
   ): Promise<SessionMessage> {
     const session = await this.getSession(sessionKey);
     const message = createSessionMessage(messageInput);
+    const wasEmpty = session.messages.length === 0;
 
     session.messages.push(message);
+    if (wasEmpty) {
+      session.createdAt = message.timestamp;
+    }
     session.updatedAt = message.timestamp;
 
     await appendSessionMessage(this.workspacePath, sessionKey, message);
+    await this.saveSession(session);
     return cloneMessage(message);
+  }
+
+  async saveSession(session: Session): Promise<void> {
+    await writeSessionState(this.workspacePath, session);
+    this.cache.set(session.sessionKey, session);
   }
 
   invalidate(sessionKey: string): void {
@@ -80,9 +92,28 @@ export class SessionManager {
   }
 
   private async loadSession(sessionKey: string): Promise<Session> {
-    const messages = await readSessionMessages(this.workspacePath, sessionKey);
+    const [messages, state] = await Promise.all([
+      readSessionMessages(this.workspacePath, sessionKey),
+      readSessionState(this.workspacePath, sessionKey),
+    ]);
+
     if (messages.length === 0) {
-      return createSession({ sessionKey });
+      const emptySessionInput: SessionInput = { sessionKey };
+
+      if (state?.createdAt !== undefined) {
+        emptySessionInput.createdAt = state.createdAt;
+      }
+      if (state?.updatedAt !== undefined) {
+        emptySessionInput.updatedAt = state.updatedAt;
+      }
+      if (state?.lastConsolidated !== undefined) {
+        emptySessionInput.lastConsolidated = state.lastConsolidated;
+      }
+      if (state?.metadata !== undefined) {
+        emptySessionInput.metadata = state.metadata;
+      }
+
+      return createSession(emptySessionInput);
     }
 
     const firstMessage = messages[0];
@@ -92,11 +123,21 @@ export class SessionManager {
       messages,
     };
 
-    if (firstMessage !== undefined) {
+    if (state?.createdAt !== undefined) {
+      sessionInput.createdAt = state.createdAt;
+    } else if (firstMessage !== undefined) {
       sessionInput.createdAt = firstMessage.timestamp;
     }
-    if (lastMessage !== undefined) {
+    if (state?.updatedAt !== undefined) {
+      sessionInput.updatedAt = state.updatedAt;
+    } else if (lastMessage !== undefined) {
       sessionInput.updatedAt = lastMessage.timestamp;
+    }
+    if (state?.lastConsolidated !== undefined) {
+      sessionInput.lastConsolidated = state.lastConsolidated;
+    }
+    if (state?.metadata !== undefined) {
+      sessionInput.metadata = state.metadata;
     }
 
     return createSession(sessionInput);

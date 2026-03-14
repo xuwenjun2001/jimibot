@@ -17,6 +17,7 @@ import {
   createUserSessionMessageFromInbound,
   type SessionMessage,
 } from "../session/index.js";
+import { MemoryStore } from "./memory.js";
 import { ToolRegistry } from "./tools/registry.js";
 
 const DEFAULT_MAX_ITERATIONS = 8;
@@ -28,10 +29,12 @@ export interface AgentLoopOptions {
   bus: MessageBus;
   provider: LLMProvider;
   sessionManager: SessionManager;
+  memoryStore?: MemoryStore;
   tools?: ToolRegistry;
   model?: string;
   maxIterations?: number;
   historyLimit?: number;
+  memoryWindow?: number;
   maxTokens?: number;
   temperature?: number;
   reasoningEffort?: string | null;
@@ -41,25 +44,31 @@ export class AgentLoop {
   private readonly bus: MessageBus;
   private readonly provider: LLMProvider;
   private readonly sessionManager: SessionManager;
+  private readonly memoryStore: MemoryStore | undefined;
   private readonly tools: ToolRegistry;
   private readonly model: string;
   private readonly maxIterations: number;
   private readonly historyLimit: number;
+  private readonly memoryWindow: number;
   private readonly maxTokens: number;
   private readonly temperature: number;
   private readonly reasoningEffort: string | null | undefined;
 
   private running = false;
   private inboundSubscribed = false;
+  private readonly backgroundTasks = new Set<Promise<void>>();
+  private readonly consolidatingSessions = new Set<string>();
 
   constructor(options: AgentLoopOptions) {
     this.bus = options.bus;
     this.provider = options.provider;
     this.sessionManager = options.sessionManager;
+    this.memoryStore = options.memoryStore;
     this.tools = options.tools ?? new ToolRegistry();
     this.model = options.model ?? this.provider.getDefaultModel();
     this.maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     this.historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
+    this.memoryWindow = options.memoryWindow ?? DEFAULT_HISTORY_LIMIT;
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.temperature = options.temperature ?? DEFAULT_TEMPERATURE;
     this.reasoningEffort = options.reasoningEffort;
@@ -78,6 +87,10 @@ export class AgentLoop {
     this.running = false;
   }
 
+  async waitForBackgroundTasks(): Promise<void> {
+    await Promise.all([...this.backgroundTasks]);
+  }
+
   async processInboundMessage(message: InboundMessage): Promise<OutboundMessage> {
     const sessionKey = getSessionKey(message);
     const history = await this.sessionManager.getHistory(
@@ -85,7 +98,8 @@ export class AgentLoop {
       this.historyLimit,
     );
     const currentUserMessage = createUserSessionMessageFromInbound(message);
-    const context = this.buildContext(history, currentUserMessage);
+    const memoryContext = await this.loadMemoryContext();
+    const context = this.buildContext(history, currentUserMessage, memoryContext);
     const turnMessages: SessionMessage[] = [currentUserMessage];
 
     let finalContent: string | null = null;
@@ -124,6 +138,7 @@ export class AgentLoop {
     }
 
     await this.persistTurn(sessionKey, turnMessages);
+    this.scheduleConsolidation(sessionKey);
 
     return createOutboundMessage({
       channel: message.channel,
@@ -163,11 +178,21 @@ export class AgentLoop {
   private buildContext(
     history: SessionMessage[],
     currentUserMessage: SessionMessage,
+    memoryContext: string,
   ): ChatMessage[] {
-    return [
-      ...history.map((message) => this.toChatMessage(message)),
-      this.toChatMessage(currentUserMessage),
-    ];
+    const context: ChatMessage[] = [];
+
+    if (memoryContext.length > 0) {
+      context.push({
+        role: "system",
+        content: memoryContext,
+      });
+    }
+
+    context.push(...history.map((message) => this.toChatMessage(message)));
+    context.push(this.toChatMessage(currentUserMessage));
+
+    return context;
   }
 
   private buildChatOptions(messages: ChatMessage[]) {
@@ -266,6 +291,66 @@ export class AgentLoop {
     for (const message of messages) {
       await this.sessionManager.append(sessionKey, message);
     }
+  }
+
+  private async loadMemoryContext(): Promise<string> {
+    if (this.memoryStore === undefined) {
+      return "";
+    }
+
+    return this.memoryStore.getMemoryContext();
+  }
+
+  private scheduleConsolidation(sessionKey: string): void {
+    if (this.memoryStore === undefined) {
+      return;
+    }
+    if (this.consolidatingSessions.has(sessionKey)) {
+      return;
+    }
+
+    this.consolidatingSessions.add(sessionKey);
+    const task = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const session = await this.sessionManager.getSession(sessionKey);
+            const unconsolidatedCount =
+              session.messages.length - session.lastConsolidated;
+
+            if (
+              !this.memoryStore?.shouldConsolidate(
+                unconsolidatedCount,
+                this.memoryWindow,
+              )
+            ) {
+              return;
+            }
+
+            const consolidated = await this.memoryStore.consolidate(
+              session,
+              this.provider,
+              this.model,
+              { memoryWindow: this.memoryWindow },
+            );
+
+            if (consolidated) {
+              await this.sessionManager.saveSession(session);
+            }
+          } catch {
+            // Memory consolidation failures should not break the main loop.
+          } finally {
+            this.consolidatingSessions.delete(sessionKey);
+            resolve();
+          }
+        })();
+      }, 0);
+    });
+
+    this.backgroundTasks.add(task);
+    void task.finally(() => {
+      this.backgroundTasks.delete(task);
+    });
   }
 
   private getErrorMessage(error: unknown): string {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { createInboundMessage } from "../bus/events.js";
 import { MessageBus } from "../bus/queue.js";
 import { MockProvider } from "../providers/mock.js";
+import { MemoryStore } from "./memory.js";
 import { SessionManager } from "../session/manager.js";
 import { AgentLoop } from "./loop.js";
 import { Tool } from "./tools/base.js";
@@ -63,6 +64,7 @@ async function createLoopHarness(subdir: string) {
   await rm(workspacePath, { recursive: true, force: true });
 
   return {
+    workspacePath,
     bus: new MessageBus(),
     sessionManager: new SessionManager(workspacePath),
   };
@@ -309,6 +311,106 @@ async function createLoopHarness(subdir: string) {
     "I reached the maximum number of tool call iterations (2) without completing the task.",
   );
   assert.equal(provider.requests.length, 2);
+}
+
+{
+  const { workspacePath, sessionManager } = await createLoopHarness(
+    "agent-loop-memory-context",
+  );
+  const memoryStore = new MemoryStore(workspacePath);
+  await memoryStore.saveMemory("# Long-term Memory\n- User prefers code examples.");
+
+  const provider = new MockProvider({
+    responses: [{ content: "我会继续给你代码例子。" }],
+  });
+
+  const loop = new AgentLoop({
+    bus: new MessageBus(),
+    provider,
+    sessionManager,
+    memoryStore,
+  });
+
+  const outbound = await loop.processInboundMessage(
+    createInboundMessage({
+      channel: "telegram",
+      senderId: "user-1",
+      chatId: "chat-5",
+      content: "继续讲解 mission10",
+    }),
+  );
+
+  assert.equal(outbound.content, "我会继续给你代码例子。");
+  assert.equal(provider.requests[0]?.messages[0]?.role, "system");
+  assert.match(
+    String(provider.requests[0]?.messages[0]?.content ?? ""),
+    /User prefers code examples\./,
+  );
+}
+
+{
+  const { workspacePath, sessionManager } = await createLoopHarness(
+    "agent-loop-memory-background",
+  );
+  const memoryStore = new MemoryStore(workspacePath);
+  const provider = new MockProvider({
+    responses: [
+      {
+        content: "这是本轮正常回复。",
+      },
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "memory_call_1",
+            name: "save_memory",
+            arguments: {
+              history_entry:
+                "[2026-03-14 10:00] User asked for Mission 10 explanation and wants code examples.",
+              memory_update:
+                "# Long-term Memory\n- User wants code-based explanations for each mission.",
+            },
+          },
+        ],
+        finishReason: "tool_calls",
+      },
+    ],
+  });
+
+  const loop = new AgentLoop({
+    bus: new MessageBus(),
+    provider,
+    sessionManager,
+    memoryStore,
+    memoryWindow: 2,
+  });
+
+  const outbound = await loop.processInboundMessage(
+    createInboundMessage({
+      channel: "telegram",
+      senderId: "user-1",
+      chatId: "chat-6",
+      content: "开始讲 mission10",
+      timestamp: new Date("2026-03-14T10:00:00.000Z"),
+    }),
+  );
+
+  assert.equal(outbound.content, "这是本轮正常回复。");
+
+  await loop.waitForBackgroundTasks();
+
+  assert.match(
+    await memoryStore.loadMemory(),
+    /User wants code-based explanations for each mission\./,
+  );
+  assert.match(
+    await memoryStore.loadHistory(),
+    /\[2026-03-14 10:00\] User asked for Mission 10 explanation and wants code examples\./,
+  );
+
+  const reloadedManager = new SessionManager(workspacePath);
+  const reloadedSession = await reloadedManager.getSession("telegram:chat-6");
+  assert.equal(reloadedSession.lastConsolidated, 1);
 }
 
 console.log("Mission 9 agent loop checks passed.");

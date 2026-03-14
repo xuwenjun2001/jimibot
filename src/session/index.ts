@@ -2,9 +2,12 @@ export {
   appendSessionMessage,
   ensureSessionsDir,
   getSessionFilePath,
+  getSessionStateFilePath,
   getSessionsDir,
+  readSessionState,
   readSessionMessages,
   sessionKeyToFilename,
+  writeSessionState,
   writeSessionMessages,
 } from "./jsonl.js";
 export { SessionManager } from "./manager.js";

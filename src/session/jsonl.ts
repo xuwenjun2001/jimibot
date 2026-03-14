@@ -1,10 +1,11 @@
 import { createReadStream } from "node:fs";
-import { appendFile, mkdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 
 import {
   isSessionMessage,
+  type Session,
   type SessionMessage,
 } from "./types.js";
 
@@ -32,6 +33,14 @@ export function getSessionFilePath(
   sessionKey: string,
 ): string {
   return path.join(getSessionsDir(workspacePath), sessionKeyToFilename(sessionKey));
+}
+
+export function getSessionStateFilePath(
+  workspacePath: string,
+  sessionKey: string,
+): string {
+  const sessionFilePath = getSessionFilePath(workspacePath, sessionKey);
+  return `${sessionFilePath}.state.json`;
 }
 
 export async function ensureSessionsDir(workspacePath: string): Promise<string> {
@@ -125,4 +134,72 @@ export async function readSessionMessages(
   }
 
   return messages;
+}
+
+export async function writeSessionState(
+  workspacePath: string,
+  session: Session,
+): Promise<string> {
+  const filePath = getSessionStateFilePath(workspacePath, session.sessionKey);
+  await ensureSessionsDir(workspacePath);
+
+  const payload = {
+    sessionKey: session.sessionKey,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    lastConsolidated: session.lastConsolidated,
+    metadata: session.metadata,
+  };
+
+  await writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8");
+  return filePath;
+}
+
+export async function readSessionState(
+  workspacePath: string,
+  sessionKey: string,
+): Promise<Partial<Session> | null> {
+  const filePath = getSessionStateFilePath(workspacePath, sessionKey);
+
+  try {
+    await stat(filePath);
+  } catch {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    const raw = await readFile(filePath, "utf-8");
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown JSON parse error";
+    throw new Error(`Invalid session state file ${filePath}: ${message}`);
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Invalid session state record in ${filePath}`);
+  }
+
+  const state = parsed as Record<string, unknown>;
+  const output: Partial<Session> = {};
+
+  if (typeof state.createdAt === "string") {
+    output.createdAt = state.createdAt;
+  }
+  if (typeof state.updatedAt === "string") {
+    output.updatedAt = state.updatedAt;
+  }
+  if (typeof state.lastConsolidated === "number") {
+    output.lastConsolidated = state.lastConsolidated;
+  }
+  if (
+    state.metadata !== null &&
+    typeof state.metadata === "object" &&
+    !Array.isArray(state.metadata)
+  ) {
+    output.metadata = state.metadata as Record<string, unknown>;
+  }
+
+  return output;
 }
