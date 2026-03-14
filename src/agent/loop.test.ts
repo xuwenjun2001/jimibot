@@ -6,10 +6,12 @@ import { createInboundMessage } from "../bus/events.js";
 import { MessageBus } from "../bus/queue.js";
 import { MockProvider } from "../providers/mock.js";
 import { MemoryStore } from "./memory.js";
+import { SkillsLoader } from "./skills.js";
 import { SessionManager } from "../session/manager.js";
 import { AgentLoop } from "./loop.js";
 import { Tool } from "./tools/base.js";
 import { ToolRegistry } from "./tools/registry.js";
+import { mkdir, writeFile } from "node:fs/promises";
 
 class EchoTool extends Tool {
   get name(): string {
@@ -411,6 +413,84 @@ async function createLoopHarness(subdir: string) {
   const reloadedManager = new SessionManager(workspacePath);
   const reloadedSession = await reloadedManager.getSession("telegram:chat-6");
   assert.equal(reloadedSession.lastConsolidated, 1);
+}
+
+{
+  const { workspacePath, sessionManager } = await createLoopHarness(
+    "agent-loop-skills-context",
+  );
+  const builtinSkillsPath = path.join(process.cwd(), "tmp", "agent-loop-skill-builtins");
+  await rm(builtinSkillsPath, { recursive: true, force: true });
+
+  await mkdir(path.join(workspacePath, "skills", "memory"), { recursive: true });
+  await mkdir(path.join(workspacePath, "skills", "docker"), { recursive: true });
+  await mkdir(path.join(builtinSkillsPath, "cron"), { recursive: true });
+
+  await writeFile(
+    path.join(workspacePath, "skills", "memory", "SKILL.md"),
+    [
+      "---",
+      "description: Remember long-term user facts.",
+      "alwaysLoad: true",
+      "---",
+      "Keep stable user preferences and project context here.",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  await writeFile(
+    path.join(workspacePath, "skills", "docker", "SKILL.md"),
+    [
+      "---",
+      "description: Use Docker when containerization is needed.",
+      "---",
+      "Use this skill to build and run containers.",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  await writeFile(
+    path.join(builtinSkillsPath, "cron", "SKILL.md"),
+    [
+      "---",
+      "description: Schedule recurring jobs.",
+      "alwaysLoad: true",
+      "---",
+      "Use this skill for periodic tasks.",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  const skillsLoader = new SkillsLoader(workspacePath, builtinSkillsPath);
+  const provider = new MockProvider({
+    responses: [{ content: "我已经看到了已加载技能和技能摘要。" }],
+  });
+
+  const loop = new AgentLoop({
+    bus: new MessageBus(),
+    provider,
+    sessionManager,
+    skillsLoader,
+  });
+
+  const outbound = await loop.processInboundMessage(
+    createInboundMessage({
+      channel: "telegram",
+      senderId: "user-1",
+      chatId: "chat-7",
+      content: "继续讲解 mission11",
+    }),
+  );
+
+  assert.equal(outbound.content, "我已经看到了已加载技能和技能摘要。");
+  const requestMessages = provider.requests[0]?.messages ?? [];
+  assert.equal(requestMessages[0]?.role, "system");
+  assert.match(String(requestMessages[0]?.content ?? ""), /Loaded Skills/);
+  assert.match(String(requestMessages[0]?.content ?? ""), /Skill: cron/);
+  assert.match(String(requestMessages[0]?.content ?? ""), /Skill: memory/);
+  assert.equal(requestMessages[1]?.role, "system");
+  assert.match(String(requestMessages[1]?.content ?? ""), /Available Skills/);
+  assert.match(String(requestMessages[1]?.content ?? ""), /<name>docker<\/name>/);
 }
 
 console.log("Mission 9 agent loop checks passed.");

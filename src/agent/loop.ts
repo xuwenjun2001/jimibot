@@ -18,6 +18,7 @@ import {
   type SessionMessage,
 } from "../session/index.js";
 import { MemoryStore } from "./memory.js";
+import { SkillsLoader } from "./skills.js";
 import { ToolRegistry } from "./tools/registry.js";
 
 const DEFAULT_MAX_ITERATIONS = 8;
@@ -30,7 +31,9 @@ export interface AgentLoopOptions {
   provider: LLMProvider;
   sessionManager: SessionManager;
   memoryStore?: MemoryStore;
+  skillsLoader?: SkillsLoader;
   tools?: ToolRegistry;
+  skillNames?: string[];
   model?: string;
   maxIterations?: number;
   historyLimit?: number;
@@ -45,7 +48,9 @@ export class AgentLoop {
   private readonly provider: LLMProvider;
   private readonly sessionManager: SessionManager;
   private readonly memoryStore: MemoryStore | undefined;
+  private readonly skillsLoader: SkillsLoader | undefined;
   private readonly tools: ToolRegistry;
+  private readonly skillNames: string[];
   private readonly model: string;
   private readonly maxIterations: number;
   private readonly historyLimit: number;
@@ -64,7 +69,9 @@ export class AgentLoop {
     this.provider = options.provider;
     this.sessionManager = options.sessionManager;
     this.memoryStore = options.memoryStore;
+    this.skillsLoader = options.skillsLoader;
     this.tools = options.tools ?? new ToolRegistry();
+    this.skillNames = options.skillNames ?? [];
     this.model = options.model ?? this.provider.getDefaultModel();
     this.maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     this.historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
@@ -99,7 +106,15 @@ export class AgentLoop {
     );
     const currentUserMessage = createUserSessionMessageFromInbound(message);
     const memoryContext = await this.loadMemoryContext();
-    const context = this.buildContext(history, currentUserMessage, memoryContext);
+    const skillsContext = await this.loadSkillsContext();
+    const skillsSummary = await this.loadSkillsSummary();
+    const context = this.buildContext(
+      history,
+      currentUserMessage,
+      memoryContext,
+      skillsContext,
+      skillsSummary,
+    );
     const turnMessages: SessionMessage[] = [currentUserMessage];
 
     let finalContent: string | null = null;
@@ -179,6 +194,8 @@ export class AgentLoop {
     history: SessionMessage[],
     currentUserMessage: SessionMessage,
     memoryContext: string,
+    skillsContext: string,
+    skillsSummary: string,
   ): ChatMessage[] {
     const context: ChatMessage[] = [];
 
@@ -186,6 +203,18 @@ export class AgentLoop {
       context.push({
         role: "system",
         content: memoryContext,
+      });
+    }
+    if (skillsContext.length > 0) {
+      context.push({
+        role: "system",
+        content: `## Loaded Skills\n${skillsContext}`,
+      });
+    }
+    if (skillsSummary.length > 0) {
+      context.push({
+        role: "system",
+        content: `## Available Skills\n${skillsSummary}`,
       });
     }
 
@@ -299,6 +328,28 @@ export class AgentLoop {
     }
 
     return this.memoryStore.getMemoryContext();
+  }
+
+  private async loadSkillsContext(): Promise<string> {
+    if (this.skillsLoader === undefined) {
+      return "";
+    }
+
+    const alwaysSkills = await this.skillsLoader.getAlwaysLoadSkills();
+    const names = new Set<string>([
+      ...alwaysSkills.map((skill) => skill.name),
+      ...this.skillNames,
+    ]);
+
+    return this.skillsLoader.loadSkillsForContext([...names]);
+  }
+
+  private async loadSkillsSummary(): Promise<string> {
+    if (this.skillsLoader === undefined) {
+      return "";
+    }
+
+    return this.skillsLoader.buildSkillsSummary();
   }
 
   private scheduleConsolidation(sessionKey: string): void {
