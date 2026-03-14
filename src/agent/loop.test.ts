@@ -4,9 +4,15 @@ import path from "node:path";
 
 import { createInboundMessage } from "../bus/events.js";
 import { MessageBus } from "../bus/queue.js";
+import {
+  LLMProvider,
+  LLMResponse,
+  type ChatOptions,
+} from "../providers/base.js";
 import { MockProvider } from "../providers/mock.js";
 import { MemoryStore } from "./memory.js";
 import { SkillsLoader } from "./skills.js";
+import { SubagentManager } from "./subagent.js";
 import { SessionManager } from "../session/manager.js";
 import { AgentLoop } from "./loop.js";
 import { Tool } from "./tools/base.js";
@@ -58,6 +64,31 @@ class FailingTool extends Tool {
 
   async execute(): Promise<string> {
     throw new Error("tool failed");
+  }
+}
+
+class DelayedProvider extends LLMProvider {
+  constructor(
+    private readonly inner: MockProvider,
+    private readonly delayMs: number,
+  ) {
+    super();
+  }
+
+  get requests() {
+    return this.inner.requests;
+  }
+
+  async chat(options: ChatOptions): Promise<LLMResponse> {
+    await new Promise((resolve) => {
+      setTimeout(resolve, this.delayMs);
+    });
+
+    return this.inner.chat(options);
+  }
+
+  getDefaultModel(): string {
+    return this.inner.getDefaultModel();
   }
 }
 
@@ -491,6 +522,141 @@ async function createLoopHarness(subdir: string) {
   assert.equal(requestMessages[1]?.role, "system");
   assert.match(String(requestMessages[1]?.content ?? ""), /Available Skills/);
   assert.match(String(requestMessages[1]?.content ?? ""), /<name>docker<\/name>/);
+}
+
+{
+  const { workspacePath, bus, sessionManager } = await createLoopHarness(
+    "agent-loop-subagent",
+  );
+  const mainProvider = new MockProvider({
+    defaultModel: "mock-gpt",
+    responses: [
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "spawn_call_1",
+            name: "spawn",
+            arguments: {
+              task: "Inspect the workspace with exec and report the result.",
+              label: "inspect workspace",
+            },
+          },
+        ],
+        finishReason: "tool_calls",
+      },
+      {
+        content: "我先在后台检查，完成后再告诉你。",
+      },
+      {
+        content: "我已经检查完成：当前目录访问正常。",
+      },
+    ],
+  });
+  const subagentBaseProvider = new MockProvider({
+    defaultModel: "mock-gpt",
+    responses: [
+      {
+        content: null,
+        toolCalls: [
+          {
+            id: "sub_call_1",
+            name: "exec",
+            arguments: {
+              command: "echo workspace-ok",
+            },
+          },
+        ],
+        finishReason: "tool_calls",
+      },
+      {
+        content: "The workspace is reachable. Command output: workspace-ok.",
+      },
+    ],
+  });
+  const subagentProvider = new DelayedProvider(subagentBaseProvider, 20);
+  const subagentManager = new SubagentManager({
+    bus,
+    provider: subagentProvider,
+    workspacePath,
+  });
+
+  const firstOutbound = new Promise<string>((resolve) => {
+    bus.onOutbound(async (message) => {
+      if (message.content === "我先在后台检查，完成后再告诉你。") {
+        resolve(message.content);
+      }
+    });
+  });
+
+  const secondOutbound = new Promise<{
+    channel: string;
+    chatId: string;
+    content: string;
+  }>((resolve) => {
+    bus.onOutbound(async (message) => {
+      if (message.content === "我已经检查完成：当前目录访问正常。") {
+        resolve({
+          channel: message.channel,
+          chatId: message.chatId,
+          content: message.content,
+        });
+      }
+    });
+  });
+
+  const loop = new AgentLoop({
+    bus,
+    provider: mainProvider,
+    sessionManager,
+    subagentManager,
+  });
+  loop.start();
+
+  bus.publishInbound(
+    createInboundMessage({
+      channel: "telegram",
+      senderId: "user-1",
+      chatId: "chat-8",
+      content: "帮我后台检查一下当前工作区。",
+    }),
+  );
+
+  assert.equal(await firstOutbound, "我先在后台检查，完成后再告诉你。");
+  const finalOutbound = await secondOutbound;
+  await subagentManager.waitForAll();
+
+  assert.deepEqual(finalOutbound, {
+    channel: "telegram",
+    chatId: "chat-8",
+    content: "我已经检查完成：当前目录访问正常。",
+  });
+
+  assert.equal(mainProvider.requests.length, 3);
+  assert.match(
+    String(mainProvider.requests[0]?.tools?.map((tool) => tool.function.name).join(",")),
+    /spawn/,
+  );
+  assert.match(
+    String(mainProvider.requests[2]?.messages.at(-1)?.content ?? ""),
+    /Background task 'inspect workspace' completed successfully/,
+  );
+
+  assert.equal(subagentProvider.requests.length, 2);
+  const subagentToolNames =
+    subagentProvider.requests[0]?.tools?.map((tool) => tool.function.name).sort() ??
+    [];
+  assert.deepEqual(subagentToolNames, ["exec", "read_file"]);
+
+  const history = await sessionManager.getHistory("telegram:chat-8");
+  assert.deepEqual(history.map((message) => message.role), [
+    "user",
+    "assistant",
+    "tool",
+    "assistant",
+    "user",
+    "assistant",
+  ]);
 }
 
 console.log("Mission 9 agent loop checks passed.");

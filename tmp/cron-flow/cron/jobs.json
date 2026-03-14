@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "cron-flow-job",
+      "name": "Break reminder",
+      "enabled": true,
+      "schedule": {
+        "kind": "every",
+        "everyMs": 60000
+      },
+      "payload": {
+        "kind": "agent_turn",
+        "message": "请提醒我休息一下。",
+        "deliver": true,
+        "channel": "cli",
+        "chatId": "direct"
+      },
+      "state": {
+        "nextRunAtMs": 1773482520000,
+        "lastRunAtMs": 1773482460000,
+        "lastStatus": "ok"
+      },
+      "createdAtMs": 1773482400000,
+      "updatedAtMs": 1773482460000,
+      "deleteAfterRun": false
+    }
+  ]
+}

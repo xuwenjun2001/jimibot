@@ -10,8 +10,22 @@ export const TelegramConfigSchema = z.object({
 
 export type TelegramConfig = z.infer<typeof TelegramConfigSchema>;
 
+export const CliConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  allowFrom: z.array(z.string()).default(["*"]),
+  senderId: z.string().default("cli-user"),
+  chatId: z.string().default("direct"),
+  prompt: z.string().default(""),
+  assistantPrefix: z.string().default("AI: "),
+  exitCommands: z
+    .array(z.string())
+    .default(["exit", "quit", "/exit", "/quit"]),
+});
+
+export type CliConfig = z.infer<typeof CliConfigSchema>;
+
 export const AgentDefaultsSchema = z.object({
-  workspace: z.string().default("~/.nanobot/workspace"),
+  workspace: z.string().default("~/.jimibot/workspace"),
   model: z.string().default("anthropic/claude-opus-4-5"),
   provider: z.string().default("auto"),
   maxTokens: z.number().int().positive().default(8192),
@@ -37,6 +51,7 @@ export const AgentsConfigSchema = z.object({
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
 
 export const ChannelsConfigSchema = z.object({
+  cli: CliConfigSchema.prefault({}),
   telegram: TelegramConfigSchema.prefault({}),
 });
 

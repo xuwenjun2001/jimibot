@@ -19,6 +19,10 @@ import {
 } from "../session/index.js";
 import { MemoryStore } from "./memory.js";
 import { SkillsLoader } from "./skills.js";
+import { SubagentManager } from "./subagent.js";
+import { CronService } from "../cron/service.js";
+import { CronTool } from "./tools/cron.js";
+import { SpawnTool } from "./tools/spawn.js";
 import { ToolRegistry } from "./tools/registry.js";
 
 const DEFAULT_MAX_ITERATIONS = 8;
@@ -32,6 +36,8 @@ export interface AgentLoopOptions {
   sessionManager: SessionManager;
   memoryStore?: MemoryStore;
   skillsLoader?: SkillsLoader;
+  subagentManager?: SubagentManager;
+  cronService?: CronService;
   tools?: ToolRegistry;
   skillNames?: string[];
   model?: string;
@@ -49,6 +55,8 @@ export class AgentLoop {
   private readonly sessionManager: SessionManager;
   private readonly memoryStore: MemoryStore | undefined;
   private readonly skillsLoader: SkillsLoader | undefined;
+  private readonly subagentManager: SubagentManager | undefined;
+  private readonly cronService: CronService | undefined;
   private readonly tools: ToolRegistry;
   private readonly skillNames: string[];
   private readonly model: string;
@@ -63,6 +71,7 @@ export class AgentLoop {
   private inboundSubscribed = false;
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly consolidatingSessions = new Set<string>();
+  private readonly sessionProcessing = new Map<string, Promise<void>>();
 
   constructor(options: AgentLoopOptions) {
     this.bus = options.bus;
@@ -70,6 +79,8 @@ export class AgentLoop {
     this.sessionManager = options.sessionManager;
     this.memoryStore = options.memoryStore;
     this.skillsLoader = options.skillsLoader;
+    this.subagentManager = options.subagentManager;
+    this.cronService = options.cronService;
     this.tools = options.tools ?? new ToolRegistry();
     this.skillNames = options.skillNames ?? [];
     this.model = options.model ?? this.provider.getDefaultModel();
@@ -79,6 +90,16 @@ export class AgentLoop {
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.temperature = options.temperature ?? DEFAULT_TEMPERATURE;
     this.reasoningEffort = options.reasoningEffort;
+
+    if (
+      this.subagentManager !== undefined &&
+      this.tools.get("spawn") === undefined
+    ) {
+      this.tools.register(new SpawnTool(this.subagentManager));
+    }
+    if (this.cronService !== undefined && this.tools.get("cron") === undefined) {
+      this.tools.register(new CronTool(this.cronService));
+    }
   }
 
   get isRunning(): boolean {
@@ -100,67 +121,75 @@ export class AgentLoop {
 
   async processInboundMessage(message: InboundMessage): Promise<OutboundMessage> {
     const sessionKey = getSessionKey(message);
-    const history = await this.sessionManager.getHistory(
-      sessionKey,
-      this.historyLimit,
-    );
-    const currentUserMessage = createUserSessionMessageFromInbound(message);
-    const memoryContext = await this.loadMemoryContext();
-    const skillsContext = await this.loadSkillsContext();
-    const skillsSummary = await this.loadSkillsSummary();
-    const context = this.buildContext(
-      history,
-      currentUserMessage,
-      memoryContext,
-      skillsContext,
-      skillsSummary,
-    );
-    const turnMessages: SessionMessage[] = [currentUserMessage];
+    const outboundTarget = this.resolveOutboundTarget(message);
+    this.prepareToolContext(outboundTarget.channel, outboundTarget.chatId, sessionKey);
+    const previousCronContext = this.setCronToolExecutionContext(message);
 
-    let finalContent: string | null = null;
-    let iteration = 0;
+    try {
+      const history = await this.sessionManager.getHistory(
+        sessionKey,
+        this.historyLimit,
+      );
+      const currentUserMessage = createUserSessionMessageFromInbound(message);
+      const memoryContext = await this.loadMemoryContext();
+      const skillsContext = await this.loadSkillsContext();
+      const skillsSummary = await this.loadSkillsSummary();
+      const context = this.buildContext(
+        history,
+        currentUserMessage,
+        memoryContext,
+        skillsContext,
+        skillsSummary,
+      );
+      const turnMessages: SessionMessage[] = [currentUserMessage];
 
-    while (iteration < this.maxIterations) {
-      iteration += 1;
+      let finalContent: string | null = null;
+      let iteration = 0;
 
-      const response = await this.provider.chat(this.buildChatOptions(context));
+      while (iteration < this.maxIterations) {
+        iteration += 1;
 
-      if (response.hasToolCalls) {
-        const assistantToolCallMessage = this.createAssistantToolCallMessage(response);
-        context.push(this.toChatMessage(assistantToolCallMessage));
-        turnMessages.push(assistantToolCallMessage);
+        const response = await this.provider.chat(this.buildChatOptions(context));
 
-        const toolMessages = await this.runToolCalls(response.toolCalls);
-        for (const toolMessage of toolMessages) {
-          context.push(this.toChatMessage(toolMessage));
-          turnMessages.push(toolMessage);
+        if (response.hasToolCalls) {
+          const assistantToolCallMessage = this.createAssistantToolCallMessage(response);
+          context.push(this.toChatMessage(assistantToolCallMessage));
+          turnMessages.push(assistantToolCallMessage);
+
+          const toolMessages = await this.runToolCalls(response.toolCalls);
+          for (const toolMessage of toolMessages) {
+            context.push(this.toChatMessage(toolMessage));
+            turnMessages.push(toolMessage);
+          }
+
+          continue;
         }
 
-        continue;
+        finalContent =
+          response.content ?? "I've completed processing but have no response to give.";
+        const assistantMessage = createAssistantSessionMessage(finalContent);
+        turnMessages.push(assistantMessage);
+        break;
       }
 
-      finalContent =
-        response.content ?? "I've completed processing but have no response to give.";
-      const assistantMessage = createAssistantSessionMessage(finalContent);
-      turnMessages.push(assistantMessage);
-      break;
+      if (finalContent === null) {
+        finalContent =
+          `I reached the maximum number of tool call iterations (${this.maxIterations}) without completing the task.`;
+        turnMessages.push(createAssistantSessionMessage(finalContent));
+      }
+
+      await this.persistTurn(sessionKey, turnMessages);
+      this.scheduleConsolidation(sessionKey);
+
+      return createOutboundMessage({
+        channel: outboundTarget.channel,
+        chatId: outboundTarget.chatId,
+        content: finalContent,
+        metadata: message.metadata,
+      });
+    } finally {
+      this.resetCronToolExecutionContext(previousCronContext);
     }
-
-    if (finalContent === null) {
-      finalContent =
-        `I reached the maximum number of tool call iterations (${this.maxIterations}) without completing the task.`;
-      turnMessages.push(createAssistantSessionMessage(finalContent));
-    }
-
-    await this.persistTurn(sessionKey, turnMessages);
-    this.scheduleConsolidation(sessionKey);
-
-    return createOutboundMessage({
-      channel: message.channel,
-      chatId: message.chatId,
-      content: finalContent,
-      metadata: message.metadata,
-    });
   }
 
   private ensureInboundSubscription(): void {
@@ -170,23 +199,37 @@ export class AgentLoop {
 
     this.inboundSubscribed = true;
     this.bus.onInbound(async (message) => {
-      if (!this.running) {
-        return;
-      }
+      const sessionKey = getSessionKey(message);
+      const previousTask = this.sessionProcessing.get(sessionKey) ?? Promise.resolve();
+      const currentTask = previousTask
+        .catch(() => undefined)
+        .then(async () => {
+          if (!this.running) {
+            return;
+          }
 
-      try {
-        const outbound = await this.processInboundMessage(message);
-        this.bus.publishOutbound(outbound);
-      } catch {
-        this.bus.publishOutbound(
-          createOutboundMessage({
-            channel: message.channel,
-            chatId: message.chatId,
-            content: "Sorry, I encountered an error.",
-            metadata: message.metadata,
-          }),
-        );
-      }
+          try {
+            const outbound = await this.processInboundMessage(message);
+            this.bus.publishOutbound(outbound);
+          } catch {
+            const outboundTarget = this.resolveOutboundTarget(message);
+            this.bus.publishOutbound(
+              createOutboundMessage({
+                channel: outboundTarget.channel,
+                chatId: outboundTarget.chatId,
+                content: "Sorry, I encountered an error.",
+                metadata: message.metadata,
+              }),
+            );
+          }
+        })
+        .finally(() => {
+          if (this.sessionProcessing.get(sessionKey) === currentTask) {
+            this.sessionProcessing.delete(sessionKey);
+          }
+        });
+
+      this.sessionProcessing.set(sessionKey, currentTask);
     });
   }
 
@@ -350,6 +393,63 @@ export class AgentLoop {
     }
 
     return this.skillsLoader.buildSkillsSummary();
+  }
+
+  private prepareToolContext(
+    channel: string,
+    chatId: string,
+    sessionKey: string,
+  ): void {
+    const spawnTool = this.tools.get("spawn") as
+      | { setContext?: (channel: string, chatId: string, sessionKey: string) => void }
+      | undefined;
+    const cronTool = this.tools.get("cron") as
+      | {
+          setContext?: (channel: string, chatId: string) => void;
+          setCronContext?: (active: boolean) => boolean;
+        }
+      | undefined;
+
+    spawnTool?.setContext?.(channel, chatId, sessionKey);
+    cronTool?.setContext?.(channel, chatId);
+    cronTool?.setCronContext?.(false);
+  }
+
+  private resolveOutboundTarget(message: InboundMessage): {
+    channel: string;
+    chatId: string;
+  } {
+    const originChannel = message.metadata.originChannel;
+    const originChatId = message.metadata.originChatId;
+
+    return {
+      channel:
+        typeof originChannel === "string" ? originChannel : message.channel,
+      chatId: typeof originChatId === "string" ? originChatId : message.chatId,
+    };
+  }
+
+  private setCronToolExecutionContext(message: InboundMessage): boolean | undefined {
+    const cronTool = this.tools.get("cron") as
+      | {
+          setCronContext?: (active: boolean) => boolean;
+        }
+      | undefined;
+    return cronTool?.setCronContext?.(
+      message.metadata.cron === true || message.senderId === "cron",
+    );
+  }
+
+  private resetCronToolExecutionContext(previous: boolean | undefined): void {
+    const cronTool = this.tools.get("cron") as
+      | {
+          resetCronContext?: (previous: boolean) => void;
+        }
+      | undefined;
+
+    if (previous !== undefined) {
+      cronTool?.resetCronContext?.(previous);
+    }
   }
 
   private scheduleConsolidation(sessionKey: string): void {

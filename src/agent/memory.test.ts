@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 
-import { SessionManager } from "../session/manager.js";
 import { MockProvider } from "../providers/mock.js";
+import { SessionManager } from "../session/manager.js";
 import { MemoryStore } from "./memory.js";
 
 const workspacePath = path.join(process.cwd(), "tmp", "memory-store-tests");
@@ -33,22 +33,22 @@ assert.match(
 const sessionManager = new SessionManager(workspacePath);
 await sessionManager.append("telegram:chat-1", {
   role: "user",
-  content: "请记住我偏好 TypeScript。",
+  content: "Please remember that I prefer TypeScript examples.",
   timestamp: "2026-03-14T09:00:00.000Z",
 });
 await sessionManager.append("telegram:chat-1", {
   role: "assistant",
-  content: "好的，我会尽量用 TypeScript 例子。",
+  content: "Understood. I will try to use TypeScript examples.",
   timestamp: "2026-03-14T09:00:01.000Z",
 });
 await sessionManager.append("telegram:chat-1", {
   role: "user",
-  content: "顺便记录一下：我正在学 nanobot。",
+  content: "Also note that I am learning jimibot right now.",
   timestamp: "2026-03-14T09:05:00.000Z",
 });
 await sessionManager.append("telegram:chat-1", {
   role: "assistant",
-  content: "收到，我会结合 nanobot 的上下文来解释。",
+  content: "Got it. I will explain things in the context of jimibot.",
   timestamp: "2026-03-14T09:05:01.000Z",
 });
 
@@ -63,9 +63,9 @@ const provider = new MockProvider({
           name: "save_memory",
           arguments: {
             history_entry:
-              "[2026-03-14 09:05] User is learning nanobot and prefers TypeScript examples.",
+              "[2026-03-14 09:05] User is learning jimibot and prefers TypeScript examples.",
             memory_update:
-              "# Long-term Memory\n- User likes TypeScript examples.\n- User is learning nanobot.",
+              "# Long-term Memory\n- User likes TypeScript examples.\n- User is learning jimibot.",
           },
         },
       ],
@@ -84,13 +84,13 @@ await sessionManager.saveSession(session);
 
 assert.equal(
   await store.loadMemory(),
-  "# Long-term Memory\n- User likes TypeScript examples.\n- User is learning nanobot.",
+  "# Long-term Memory\n- User likes TypeScript examples.\n- User is learning jimibot.",
 );
 
 const finalHistory = await store.loadHistory();
 assert.match(
   finalHistory,
-  /\[2026-03-14 09:05\] User is learning nanobot and prefers TypeScript examples\./,
+  /\[2026-03-14 09:05\] User is learning jimibot and prefers TypeScript examples\./,
 );
 
 const reloadedManager = new SessionManager(workspacePath);

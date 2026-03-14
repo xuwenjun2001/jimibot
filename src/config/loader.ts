@@ -5,11 +5,15 @@ import { ConfigSchema, type Config } from "./schema.js";
 
 const KEY_MAP: Record<string, string> = {
   allow_from: "allowFrom",
+  assistant_prefix: "assistantPrefix",
+  chat_id: "chatId",
+  exit_commands: "exitCommands",
   max_tokens: "maxTokens",
   max_tool_iterations: "maxToolIterations",
   memory_window: "memoryWindow",
   path_append: "pathAppend",
   reasoning_effort: "reasoningEffort",
+  sender_id: "senderId",
 };
 
 function normalizeKeys(value: unknown): unknown {
